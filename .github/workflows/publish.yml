@@ -1,0 +1,112 @@
+# Last step of every Labyrica release. Called by tauri-release.yml and
+# bundle-release.yml once the builds sit in a draft release on the source repo.
+#
+#   verify   → every expected asset is there, signed where required
+#   mirror   → copy to the public <id>-releases repo, fix latest.json URLs
+#   finalize → publish the draft on the source repo
+#
+# Nothing goes public unless verify passes, so a release can't ship something
+# Labyrica Dispatch can't install.
+name: publish
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        type: string
+        required: true
+      releases-repo:
+        description: Public downloads repo, e.g. Labyrica/hightower-releases
+        type: string
+        required: true
+      expected:
+        description: Newline-separated globs that must each match an asset.
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          EXPECTED: ${{ inputs.expected }}
+        run: |
+          set -euo pipefail
+          # Drafts aren't reachable by tag, so find it in the list.
+          gh api "repos/$REPO/releases?per_page=30" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .assets[].name" > assets.txt
+          echo "Assets on $TAG:"; sed 's/^/  /' assets.txt
+          missing=0
+          while IFS= read -r glob; do
+            glob=$(echo "$glob" | xargs)
+            [ -z "$glob" ] && continue
+            found=0
+            while IFS= read -r name; do
+              # shellcheck disable=SC2254
+              case "$name" in $glob) found=1 ;; esac
+            done < assets.txt
+            if [ "$found" = 1 ]; then echo "ok       $glob"; else echo "MISSING  $glob"; missing=1; fi
+          done <<< "$EXPECTED"
+          if [ "$missing" = 1 ]; then
+            echo "::error::Release is missing assets Labyrica Dispatch needs. Nothing was published."
+            exit 1
+          fi
+
+  mirror:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Copy to ${{ inputs.releases-repo }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+          SOURCE_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET: ${{ inputs.releases-repo }}
+          TAG: ${{ github.ref_name }}
+          APP: ${{ inputs.app-name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::RELEASES_PAT isn't set (org secret, contents: write on Labyrica/*-releases)."
+            exit 1
+          fi
+          mkdir out
+          REL=$(GH_TOKEN=$SOURCE_TOKEN gh api "repos/$REPO/releases?per_page=30" --jq ".[] | select(.tag_name == \"$TAG\")")
+          echo "$REL" | jq -r '.body // ""' > notes.md
+          echo "$REL" | jq -r '.assets[] | "\(.id)\t\(.name)"' | while IFS=$'\t' read -r id name; do
+            for i in 1 2 3; do
+              GH_TOKEN=$SOURCE_TOKEN gh api -H "Accept: application/octet-stream" \
+                "repos/$REPO/releases/assets/$id" > "out/$name" && break
+              echo "retrying $name"; sleep 10
+            done
+          done
+          # latest.json points at the source repo, which may be private.
+          if [ -f out/latest.json ]; then
+            sed -i "s|github.com/$REPO/releases|github.com/$TARGET/releases|g" out/latest.json
+          fi
+          if gh release view "$TAG" --repo "$TARGET" > /dev/null 2>&1; then
+            gh release upload "$TAG" out/* --repo "$TARGET" --clobber
+          else
+            gh release create "$TAG" out/* --repo "$TARGET" --title "$APP $TAG" --notes-file notes.md
+          fi
+
+  finalize:
+    needs: mirror
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the source draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ID=$(gh api "repos/$REPO/releases?per_page=30" --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          gh api -X PATCH "repos/$REPO/releases/$ID" -F draft=false -f make_latest=true > /dev/null

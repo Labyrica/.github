@@ -1,0 +1,171 @@
+# Release a Labyrica Tauri app. Each app's own workflow is just:
+#
+#   on: { push: { tags: ["v*"] } }
+#   jobs:
+#     release:
+#       uses: Labyrica/.github/.github/workflows/tauri-release.yml@v1
+#       with:
+#         app-name: Hightower
+#         releases-repo: Labyrica/hightower-releases
+#       secrets: inherit
+#
+# Builds Windows x64 and both Macs, signs the updater artifacts, collects
+# everything in a draft release on the source repo, then hands over to
+# publish.yml (verify → mirror to the public repo → finalize).
+#
+# Secrets: TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) on the app repo,
+# RELEASES_PAT at org level. APPLE_* are optional; without them macOS builds
+# are ad-hoc signed.
+name: tauri-release
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        type: string
+        required: true
+      releases-repo:
+        type: string
+        required: true
+      project-path:
+        description: Folder holding package.json and src-tauri/.
+        type: string
+        default: "."
+      package-manager:
+        description: npm or pnpm.
+        type: string
+        default: npm
+      prepare:
+        description: Bash run after installing dependencies, before the build. $TARGET is the Rust target.
+        type: string
+        default: ""
+      tauri-args:
+        description: Extra arguments for `tauri build`.
+        type: string
+        default: ""
+      notes:
+        description: Release notes. Defaults to install instructions.
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "${{ inputs.project-path }}/src-tauri -> target"
+          key: ${{ matrix.target }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [ "${{ inputs.package-manager }}" = pnpm ]; then pnpm install --frozen-lockfile; else npm ci; fi
+
+      - name: Prepare
+        if: inputs.prepare != ''
+        shell: bash
+        run: ${{ inputs.prepare }}
+
+      - name: macOS signing (when secrets exist)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.APPLE_CERTIFICATE }}" ]; then
+            {
+              echo "APPLE_CERTIFICATE<<LABYRICA_EOF"
+              echo "${{ secrets.APPLE_CERTIFICATE }}"
+              echo "LABYRICA_EOF"
+              echo "APPLE_CERTIFICATE_PASSWORD=${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+              echo "APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY }}"
+            } >> "$GITHUB_ENV"
+          fi
+          if [ -n "${{ secrets.APPLE_ID }}" ]; then
+            {
+              echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+              echo "APPLE_PASSWORD=${{ secrets.APPLE_PASSWORD }}"
+              echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+            } >> "$GITHUB_ENV"
+          fi
+
+      - name: Release notes
+        id: notes
+        shell: bash
+        env:
+          NOTES: ${{ inputs.notes }}
+        run: |
+          {
+            echo "body<<LABYRICA_EOF"
+            if [ -n "$NOTES" ]; then
+              echo "$NOTES"
+            else
+              echo "**Easiest:** install and update it with [Labyrica Dispatch](https://github.com/Labyrica/dispatch-releases/releases/latest)."
+              echo
+              echo "**Windows:** run \`*_x64-setup.exe\`. No admin rights needed. If SmartScreen appears, click **More info → Run anyway**."
+              echo
+              echo "**Mac:** open the \`.dmg\` for your Mac (\`aarch64\` for Apple Silicon, \`x64\` for Intel) and drag the app to Applications. The first time, open **System Settings → Privacy & Security** and click **Open Anyway**."
+            fi
+            echo "LABYRICA_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: ${{ inputs.project-path }}
+          args: --target ${{ matrix.target }} ${{ inputs.tauri-args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: "${{ inputs.app-name }} ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          updaterJsonPreferNsis: true
+          includeDebug: false
+          releaseBody: ${{ steps.notes.outputs.body }}
+
+  publish:
+    needs: build
+    uses: Labyrica/.github/.github/workflows/publish.yml@v1
+    with:
+      app-name: ${{ inputs.app-name }}
+      releases-repo: ${{ inputs.releases-repo }}
+      expected: |
+        *_x64-setup.exe
+        *_x64-setup.exe.sig
+        *_aarch64.app.tar.gz
+        *_aarch64.app.tar.gz.sig
+        *_x64.app.tar.gz
+        *_x64.app.tar.gz.sig
+        *_aarch64.dmg
+        *_x64.dmg
+        latest.json
+    secrets: inherit

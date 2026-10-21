@@ -1,0 +1,141 @@
+# Release a Labyrica app that isn't built by Tauri (a Node bundle, a Swift
+# app). The app supplies a build script; this workflow signs what it produces
+# with the app's Tauri updater key (so Labyrica Dispatch verifies it the same
+# way), collects it in a draft release, then hands over to publish.yml.
+#
+#   jobs:
+#     release:
+#       uses: Labyrica/.github/.github/workflows/bundle-release.yml@v1
+#       with:
+#         app-name: Pyrite
+#         releases-repo: Labyrica/pyrite-releases
+#         targets: '[{"os":"windows-latest","name":"windows-x64"},{"os":"macos-latest","name":"macos-aarch64"}]'
+#         build: ./scripts/package.sh
+#         expected: |
+#           *_windows-x64.zip
+#           *_windows-x64.zip.sig
+#       secrets: inherit
+#
+# The build runs in bash with $TARGET_NAME (the target's "name") and $VERSION
+# (the tag without "v"), and must leave its files in ./out/.
+name: bundle-release
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        type: string
+        required: true
+      releases-repo:
+        type: string
+        required: true
+      targets:
+        description: JSON list of {"os", "name"}.
+        type: string
+        required: true
+      build:
+        type: string
+        required: true
+      expected:
+        type: string
+        required: true
+      node:
+        type: boolean
+        default: true
+      pnpm:
+        type: boolean
+        default: false
+      notes:
+        type: string
+        default: "Install and update it with [Labyrica Dispatch](https://github.com/Labyrica/dispatch-releases/releases/latest)."
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    outputs:
+      id: ${{ steps.draft.outputs.id }}
+    steps:
+      - id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          APP: ${{ inputs.app-name }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          ID=$(gh api "repos/$REPO/releases?per_page=30" --jq ".[] | select(.tag_name == \"$TAG\") | .id")
+          if [ -z "$ID" ]; then
+            ID=$(gh api -X POST "repos/$REPO/releases" -f tag_name="$TAG" -f name="$APP $TAG" \
+              -f body="$NOTES" -F draft=true --jq .id)
+          fi
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJSON(inputs.targets) }}
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET_NAME: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - if: inputs.pnpm
+        uses: pnpm/action-setup@v4
+
+      - if: inputs.node || inputs.pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          export VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          ${{ inputs.build }}
+          ls -la out
+
+      - name: Sign
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for f in out/*; do
+            case "$f" in *.sig) continue ;; esac
+            npx --yes @tauri-apps/cli@2 signer sign "$f"
+          done
+
+      - name: Upload to draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ID: ${{ needs.draft.outputs.id }}
+        run: |
+          set -euo pipefail
+          for f in out/*; do
+            name=$(basename "$f")
+            gh api -X POST -H "Content-Type: application/octet-stream" \
+              "https://uploads.github.com/repos/$REPO/releases/$ID/assets?name=$name" \
+              --input "$f" > /dev/null
+            echo "uploaded $name"
+          done
+
+  publish:
+    needs: build
+    uses: Labyrica/.github/.github/workflows/publish.yml@v1
+    with:
+      app-name: ${{ inputs.app-name }}
+      releases-repo: ${{ inputs.releases-repo }}
+      expected: ${{ inputs.expected }}
+    secrets: inherit
