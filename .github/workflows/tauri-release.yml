@@ -15,9 +15,11 @@
 # everything in a draft release on the source repo, then hands over to
 # publish.yml (verify → mirror to the public repo → finalize).
 #
-# Secrets: TAURI_SIGNING_PRIVATE_KEY (+ _PASSWORD) on the app repo,
-# RELEASES_PAT at org level. APPLE_* are optional; without them macOS builds
-# are ad-hoc signed.
+# Secrets: RELEASES_PAT at org level. Optional: TAURI_SIGNING_PRIVATE_KEY
+# (+ _PASSWORD) on the app repo signs updates, and enables the app's own
+# in-app updater; without it the release ships unsigned and Dispatch checks
+# GitHub's checksum instead. APPLE_* are optional too; without them macOS
+# builds are ad-hoc signed.
 name: tauri-release
 
 on:
@@ -142,6 +144,22 @@ jobs:
             echo "LABYRICA_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Signing key
+        id: sign
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PROJECT: ${{ inputs.project-path }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "args=" >> "$GITHUB_OUTPUT"
+          else
+            # No key: skip updater artifacts instead of failing the build.
+            echo '{"bundle":{"createUpdaterArtifacts":false}}' > "$PROJECT/.labyrica-unsigned.json"
+            echo "args=--config .labyrica-unsigned.json" >> "$GITHUB_OUTPUT"
+            echo "::notice::No TAURI_SIGNING_PRIVATE_KEY: shipping without update signatures."
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -149,7 +167,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: ${{ inputs.project-path }}
-          args: --target ${{ matrix.target }} ${{ inputs.tauri-args }}
+          args: --target ${{ matrix.target }} ${{ inputs.tauri-args }} ${{ steps.sign.outputs.args }}
           tagName: ${{ github.ref_name }}
           releaseName: "${{ inputs.app-name }} ${{ github.ref_name }}"
           releaseDraft: true
@@ -164,14 +182,10 @@ jobs:
     with:
       app-name: ${{ inputs.app-name }}
       releases-repo: ${{ inputs.releases-repo }}
+      # Signatures, .app.tar.gz and latest.json come only with a signing key,
+      # so they aren't required.
       expected: |
         *_x64-setup.exe
-        *_x64-setup.exe.sig
-        *_aarch64.app.tar.gz
-        *_aarch64.app.tar.gz.sig
-        *_x64.app.tar.gz
-        *_x64.app.tar.gz.sig
         *_aarch64.dmg
         *_x64.dmg
-        latest.json
     secrets: inherit

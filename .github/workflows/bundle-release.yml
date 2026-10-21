@@ -15,7 +15,6 @@
 #         build: ./scripts/package.sh
 #         expected: |
 #           *_windows-x64.zip
-#           *_windows-x64.zip.sig
 #       secrets: inherit
 #
 # The build runs in bash with $TARGET_NAME (the target's "name") and $VERSION
@@ -112,6 +111,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::notice::No TAURI_SIGNING_PRIVATE_KEY: shipping without signatures."
+            exit 0
+          fi
           for f in out/*; do
             case "$f" in *.sig) continue ;; esac
             npx --yes @tauri-apps/cli@2 signer sign "$f"

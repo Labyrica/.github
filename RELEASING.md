@@ -22,7 +22,7 @@ git commit -am "v0.4.0" && git tag v0.4.0 && git push --follow-tags
 | Downloads repo | `Labyrica/<id>-releases`, public, holds only releases. |
 | Tags | `vX.Y.Z`. Nothing else triggers a release. |
 | Release workflow | `.github/workflows/release.yml` calling the shared one (below). |
-| Signing key | `npx tauri signer generate -w ~/.tauri/<id>.key -p ""`, then secret `TAURI_SIGNING_PRIVATE_KEY` on the source repo. Public key goes in the Dispatch catalog. |
+| Signing key (optional) | `npx tauri signer generate -w ~/.tauri/<id>.key -p ""`, secret `TAURI_SIGNING_PRIVATE_KEY` on the source repo, public key in the Dispatch catalog. Without one, releases ship unsigned and Dispatch checks GitHub's SHA-256 instead. Lost a key? Make a new one and update the catalog: Dispatch picks it up on its next check. |
 | Beacon | copy [`snippets/dispatch_beacon.rs`](snippets/dispatch_beacon.rs), call it from `.setup`. |
 
 New Tauri apps also use, so the catalog needs no overrides:
@@ -68,8 +68,8 @@ script that leaves its files in `./out/`. See the header of
 
 Both end in [`publish.yml`](.github/workflows/publish.yml):
 
-1. **Verify.** The draft must contain every asset Dispatch expects, with
-   signatures. If not, nothing is published.
+1. **Verify.** The draft must contain every asset Dispatch expects. If not,
+   nothing is published.
 2. **Mirror** to `<id>-releases`, rewriting `latest.json` to the public URLs.
 3. **Finalize** the draft on the source repo.
 
@@ -77,14 +77,16 @@ Both end in [`publish.yml`](.github/workflows/publish.yml):
 
 | Kind | Windows | macOS |
 |---|---|---|
-| Tauri app | `*_x64-setup.exe` + `.sig` | `*_{aarch64,x64}.app.tar.gz` + `.sig`, `.dmg` for people |
-| Bundle | `*_windows-x64.zip` + `.sig` | `*_macos-{aarch64,x64}.zip` + `.sig` |
-| Mac app (Swift) | n/a | `*_{aarch64,x64}.app.tar.gz` + `.sig` |
+| Tauri app | `*_x64-setup.exe` | `*_{aarch64,x64}.dmg` (plus `.app.tar.gz` when signed) |
+| Bundle | `*_windows-x64.zip` | `*_macos-{aarch64,x64}.zip` |
+| Mac app (Swift) | n/a | `*_{aarch64,x64}.app.tar.gz` |
+
+`.sig` files are added automatically when the repo has a signing key.
 
 ## Org secrets
 
 | Secret | Where | What |
 |---|---|---|
 | `RELEASES_PAT` | org | Fine-grained token, contents: read/write on `Labyrica/*-releases`. |
-| `TAURI_SIGNING_PRIVATE_KEY` | each app repo | That app's key. `_PASSWORD` empty. |
+| `TAURI_SIGNING_PRIVATE_KEY` | each app repo, optional | That app's key. `_PASSWORD` empty. |
 | `APPLE_*` | org, optional | Developer ID signing + notarization. Without them Macs show "Open Anyway" once. |
