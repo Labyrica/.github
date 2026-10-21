@@ -3,6 +3,8 @@
 # with the app's Tauri updater key (so Labyrica Dispatch verifies it the same
 # way), collects it in a draft release, then hands over to publish.yml.
 #
+#   permissions:
+#     contents: write
 #   jobs:
 #     release:
 #       uses: Labyrica/.github/.github/workflows/bundle-release.yml@v1

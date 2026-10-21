@@ -48,6 +48,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+permissions:
+  contents: write
 jobs:
   release:
     uses: Labyrica/.github/.github/workflows/tauri-release.yml@v1
